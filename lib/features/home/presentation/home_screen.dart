@@ -202,14 +202,6 @@ class _SentinelHomeScreenState extends ConsumerState<SentinelHomeScreen> {
                   },
                   child: const Text('Clear Spotlight'),
                 ),
-                OutlinedButton(
-                  onPressed: () {
-                    ref
-                        .read(assistantControllerProvider)
-                        .onRecalculationTriggered();
-                  },
-                  child: const Text('Simulate Recalculation'),
-                ),
               ],
             ),
           ],

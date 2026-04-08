@@ -108,6 +108,8 @@ class _BrainSignalMonitor {
   static const Duration _gpsDebounceDuration = Duration(seconds: 8);
   static const Duration _gpsMinimumInterval = Duration(seconds: 30);
   static const Duration _gpsPollingInterval = Duration(seconds: 20);
+  static const Duration _travelStationaryDuration = Duration(minutes: 5);
+  static const double _stationaryDistanceThresholdMeters = 25;
 
   final ServiceInstance _service;
   final BackgroundSchedulerOrchestrator _scheduler =
@@ -122,6 +124,9 @@ class _BrainSignalMonitor {
   final Map<String, DateTime> _lastRecalculationAt = {};
   double? _pendingLatitude;
   double? _pendingLongitude;
+  Position? _stationaryAnchor;
+  DateTime? _stationarySince;
+  bool _didTriggerTravelStationaryRecalculation = false;
 
   Future<void> start() async {
     final restoredMode = await PriorityModePersistence.load();
@@ -265,6 +270,7 @@ class _BrainSignalMonitor {
             );
 
             _scheduleGpsRecalculation(position);
+            unawaited(_evaluateTravelStationaryTrigger(position));
           });
     } catch (_) {
       // Permission and service state are expected to vary by user/device.
@@ -308,6 +314,7 @@ class _BrainSignalMonitor {
       });
 
       _scheduleGpsRecalculation(position);
+      unawaited(_evaluateTravelStationaryTrigger(position));
     } catch (_) {
       _service.invoke('gps_status', {
         'timestamp': DateTime.now().toIso8601String(),
@@ -332,6 +339,62 @@ class _BrainSignalMonitor {
         ),
       );
     });
+  }
+
+  Future<void> _evaluateTravelStationaryTrigger(Position position) async {
+    final hasTravelTask = await _scheduler.hasInProgressTravelTask();
+    if (!hasTravelTask) {
+      _stationaryAnchor = null;
+      _stationarySince = null;
+      _didTriggerTravelStationaryRecalculation = false;
+      return;
+    }
+
+    final now = DateTime.now();
+    final anchor = _stationaryAnchor;
+
+    if (anchor == null) {
+      _stationaryAnchor = position;
+      _stationarySince = now;
+      _didTriggerTravelStationaryRecalculation = false;
+      return;
+    }
+
+    final distanceMeters = Geolocator.distanceBetween(
+      anchor.latitude,
+      anchor.longitude,
+      position.latitude,
+      position.longitude,
+    );
+
+    if (distanceMeters > _stationaryDistanceThresholdMeters) {
+      _stationaryAnchor = position;
+      _stationarySince = now;
+      _didTriggerTravelStationaryRecalculation = false;
+      return;
+    }
+
+    _stationarySince ??= now;
+    final stationaryDuration = now.difference(_stationarySince!);
+    if (_didTriggerTravelStationaryRecalculation ||
+        stationaryDuration < _travelStationaryDuration) {
+      return;
+    }
+
+    _didTriggerTravelStationaryRecalculation = true;
+    _service.invoke('gps_status', {
+      'timestamp': now.toIso8601String(),
+      'state': 'travel_stationary_recalc_trigger',
+      'stationaryMs': stationaryDuration.inMilliseconds,
+    });
+
+    await _runRecalculation(
+      triggerSource: 'gps_travel_stationary_5m',
+      latitude: position.latitude,
+      longitude: position.longitude,
+      throttleKey: 'gps_travel_stationary',
+      isForce: true,
+    );
   }
 
   Future<void> _runRecalculation({

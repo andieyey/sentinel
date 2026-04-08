@@ -31,6 +31,21 @@ class BackgroundSchedulerOrchestrator {
     await _ensureIsar();
   }
 
+  Future<bool> hasInProgressTravelTask() async {
+    final isar = await _ensureIsar();
+    final tasks = await isar.tasks.where().findAll();
+
+    return tasks.any((task) {
+      if (task.status != TaskStatus.inProgress) {
+        return false;
+      }
+
+      final title = task.title.toLowerCase();
+      final description = task.description?.toLowerCase() ?? '';
+      return title.contains('travel') || description.contains('travel');
+    });
+  }
+
   Future<SchedulerRecalculationResult> recalculate({
     required DateTime now,
     required String triggerSource,
