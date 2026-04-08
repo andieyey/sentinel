@@ -12,6 +12,7 @@ import '../scheduler/priority_mode.dart';
 import '../scheduler/priority_mode_persistence.dart';
 import '../../features/scheduler/domain/conflict_solver.dart';
 import 'notification_bridge.dart';
+import 'travel_stationary_detector.dart';
 
 class SentinelBackgroundService {
   SentinelBackgroundService._();
@@ -108,12 +109,12 @@ class _BrainSignalMonitor {
   static const Duration _gpsDebounceDuration = Duration(seconds: 8);
   static const Duration _gpsMinimumInterval = Duration(seconds: 30);
   static const Duration _gpsPollingInterval = Duration(seconds: 20);
-  static const Duration _travelStationaryDuration = Duration(minutes: 5);
-  static const double _stationaryDistanceThresholdMeters = 25;
 
   final ServiceInstance _service;
   final BackgroundSchedulerOrchestrator _scheduler =
       BackgroundSchedulerOrchestrator();
+    final TravelStationaryDetector _travelStationaryDetector =
+      TravelStationaryDetector();
 
   Timer? _statusTimer;
   Timer? _gpsDebounceTimer;
@@ -124,9 +125,6 @@ class _BrainSignalMonitor {
   final Map<String, DateTime> _lastRecalculationAt = {};
   double? _pendingLatitude;
   double? _pendingLongitude;
-  Position? _stationaryAnchor;
-  DateTime? _stationarySince;
-  bool _didTriggerTravelStationaryRecalculation = false;
 
   Future<void> start() async {
     final restoredMode = await PriorityModePersistence.load();
@@ -343,55 +341,28 @@ class _BrainSignalMonitor {
 
   Future<void> _evaluateTravelStationaryTrigger(Position position) async {
     final hasTravelTask = await _scheduler.hasInProgressTravelTask();
-    if (!hasTravelTask) {
-      _stationaryAnchor = null;
-      _stationarySince = null;
-      _didTriggerTravelStationaryRecalculation = false;
+    final sample = TravelLocationSample.fromPosition(position);
+    if (!_travelStationaryDetector.observe(
+      sample: sample,
+      hasTravelTask: hasTravelTask,
+    )) {
       return;
     }
 
-    final now = DateTime.now();
-    final anchor = _stationaryAnchor;
-
-    if (anchor == null) {
-      _stationaryAnchor = position;
-      _stationarySince = now;
-      _didTriggerTravelStationaryRecalculation = false;
-      return;
-    }
-
-    final distanceMeters = Geolocator.distanceBetween(
-      anchor.latitude,
-      anchor.longitude,
-      position.latitude,
-      position.longitude,
-    );
-
-    if (distanceMeters > _stationaryDistanceThresholdMeters) {
-      _stationaryAnchor = position;
-      _stationarySince = now;
-      _didTriggerTravelStationaryRecalculation = false;
-      return;
-    }
-
-    _stationarySince ??= now;
-    final stationaryDuration = now.difference(_stationarySince!);
-    if (_didTriggerTravelStationaryRecalculation ||
-        stationaryDuration < _travelStationaryDuration) {
-      return;
-    }
-
-    _didTriggerTravelStationaryRecalculation = true;
+    final now = sample.timestamp;
     _service.invoke('gps_status', {
       'timestamp': now.toIso8601String(),
       'state': 'travel_stationary_recalc_trigger',
-      'stationaryMs': stationaryDuration.inMilliseconds,
+      'stationaryMs': (
+        _travelStationaryDetector.stationaryWarmup +
+        _travelStationaryDetector.stationaryDuration
+      ).inMilliseconds,
     });
 
     await _runRecalculation(
       triggerSource: 'gps_travel_stationary_5m',
-      latitude: position.latitude,
-      longitude: position.longitude,
+      latitude: sample.latitude,
+      longitude: sample.longitude,
       throttleKey: 'gps_travel_stationary',
       isForce: true,
     );

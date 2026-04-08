@@ -5,7 +5,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/background/background_status.dart';
-import '../../../core/platform/activitykit_bridge.dart';
+import '../../../core/platform/lock_screen_assistant_controller.dart';
 import '../../../core/scheduler/priority_mode.dart';
 import '../../../core/scheduler/priority_mode_persistence.dart';
 import '../../../core/storage/isar_provider.dart';
@@ -23,9 +23,6 @@ class SentinelHomeScreen extends ConsumerStatefulWidget {
 
 class _SentinelHomeScreenState extends ConsumerState<SentinelHomeScreen> {
   final GlobalKey _priorityToggleKey = GlobalKey();
-  String? _activeLiveActivityId;
-  bool _didCheckActivityKitSupport = false;
-  bool _activityKitSupported = false;
 
   void _showSpotlight() {
     final targetContext = _priorityToggleKey.currentContext;
@@ -56,7 +53,13 @@ class _SentinelHomeScreenState extends ConsumerState<SentinelHomeScreen> {
     ref.listen(backgroundRecalculationProvider, (_, next) {
       next.whenData((event) {
         if (!event.isThrottled && event.changedTaskCount > 0) {
-          unawaited(_syncLiveActivity(event));
+          final mode = ref.read(priorityModeProvider);
+          unawaited(
+            LockScreenAssistantController.instance.syncRecalculation(
+              event: event,
+              mode: mode,
+            ),
+          );
           ref.read(assistantControllerProvider).onRecalculationTriggered();
         }
       });
@@ -208,44 +211,5 @@ class _SentinelHomeScreenState extends ConsumerState<SentinelHomeScreen> {
         ),
       ),
     );
-  }
-
-  Future<void> _syncLiveActivity(BackgroundRecalculationEvent event) async {
-    if (!_didCheckActivityKitSupport) {
-      _activityKitSupported = await ActivityKitBridge.isSupported();
-      _didCheckActivityKitSupport = true;
-    }
-
-    if (!_activityKitSupported) {
-      return;
-    }
-
-    final mode = ref.read(priorityModeProvider);
-    final payload = <String, dynamic>{
-      'title': 'Project Sentinel',
-      'statusLine':
-          'Adjusted ${event.changedTaskCount}/${event.totalTaskCount} tasks',
-      'mode': mode.label,
-      'changedTaskCount': event.changedTaskCount,
-      'totalTaskCount': event.totalTaskCount,
-      'updatedAt': event.timestamp.toIso8601String(),
-      'progress': event.totalTaskCount == 0
-          ? 0.0
-          : event.changedTaskCount / event.totalTaskCount,
-    };
-
-    if (_activeLiveActivityId == null) {
-      _activeLiveActivityId = await ActivityKitBridge.startActivity(payload);
-      return;
-    }
-
-    final updated = await ActivityKitBridge.updateActivity(
-      activityId: _activeLiveActivityId!,
-      payload: payload,
-    );
-
-    if (!updated) {
-      _activeLiveActivityId = await ActivityKitBridge.startActivity(payload);
-    }
   }
 }

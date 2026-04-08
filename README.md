@@ -27,6 +27,7 @@ Adaptive task scheduler that treats time as a liquid resource.
 - Persisted global priority mode that restores on startup and background service boot
 - Debounced and throttled recalculation policy for noisy GPS/time streams
 - Real iOS ActivityKit lifecycle bridge (start/update/end) over method channel
+- Heartbeat events now sync to an iOS Live Activity, while Android keeps the persistent foreground notification updated
 
 ## Quick start
 
