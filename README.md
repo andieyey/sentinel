@@ -48,6 +48,31 @@ flutter pub run build_runner build --delete-conflicting-outputs
 flutter run
 ```
 
+## PoC validation checklist
+
+1. Verify automated checks.
+
+```bash
+flutter test
+flutter test test/conflict_solver_test.dart
+```
+
+2. Verify scheduler behavior in-app.
+
+- In Sleep mode, ensure an elastic task overlapping the sleep window is deferred.
+- In Deadline mode, ensure deferred tasks are pulled forward and buffers are reduced.
+
+3. Verify runtime PoC signals on the home screen.
+
+- Background Heartbeat updates roughly every 10 minutes.
+- Recalculation Feed updates after recalculation triggers.
+- GPS Stream shows permission/status and tick updates when available.
+
+4. Verify assistant/overlay hooks.
+
+- Tap Simulate Recalculation and confirm proactive assistant flow is triggered.
+- Tap Start Spotlight and verify the priority mode control is highlighted.
+
 ## Structure
 
 ```text
