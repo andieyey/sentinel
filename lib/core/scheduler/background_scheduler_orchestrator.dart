@@ -3,18 +3,25 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../features/scheduler/domain/conflict_solver.dart';
 import '../../features/tasks/domain/task.dart';
+import 'target_sleep_time_persistence.dart';
 
 class SchedulerRecalculationResult {
   const SchedulerRecalculationResult({
     required this.changedTaskCount,
     required this.totalTaskCount,
     required this.triggerSource,
+    this.failingTravelTaskTitle,
+    this.totalDayDelayMinutes,
+    this.sleepAtRiskTime,
     this.error,
   });
 
   final int changedTaskCount;
   final int totalTaskCount;
   final String triggerSource;
+  final String? failingTravelTaskTitle;
+  final int? totalDayDelayMinutes;
+  final DateTime? sleepAtRiskTime;
   final Object? error;
 
   bool get didChangeSchedule => changedTaskCount > 0;
@@ -23,6 +30,7 @@ class SchedulerRecalculationResult {
 
 class BackgroundSchedulerOrchestrator {
   static const String _isarName = 'sentinel_local';
+  static const Duration _sleepRiskGraceWindow = Duration(minutes: 15);
 
   Isar? _isar;
   bool _isRecalculating = false;
@@ -93,13 +101,28 @@ class BackgroundSchedulerOrchestrator {
       }
 
       var changedTaskCount = 0;
+      var totalDayDelayMinutes = 0;
       for (final task in resolvedTasks) {
         final previous = snapshots[task.id];
         task.updatedAt = now;
         if (previous == null || previous.hasChanged(task)) {
           changedTaskCount++;
         }
+        if (previous != null) {
+          final delayDelta =
+              task.scheduledStart.difference(previous.scheduledStart).inMinutes;
+          if (delayDelta > 0) {
+            totalDayDelayMinutes += delayDelta;
+          }
+        }
       }
+
+      final travelTask = _firstTravelAtRiskTask(resolvedTasks);
+      final targetSleepTime = await TargetSleepTimePersistence.load();
+      final sleepAtRiskTime = _deriveSleepAtRiskTime(
+        resolvedTasks,
+        targetSleepTime: targetSleepTime,
+      );
 
       if (changedTaskCount > 0) {
         await isar.writeTxn(() async {
@@ -111,6 +134,9 @@ class BackgroundSchedulerOrchestrator {
         changedTaskCount: changedTaskCount,
         totalTaskCount: resolvedTasks.length,
         triggerSource: triggerSource,
+        failingTravelTaskTitle: travelTask?.title,
+        totalDayDelayMinutes: totalDayDelayMinutes,
+        sleepAtRiskTime: sleepAtRiskTime,
       );
     } catch (error) {
       return SchedulerRecalculationResult(
@@ -150,6 +176,58 @@ class BackgroundSchedulerOrchestrator {
     );
 
     return _isar!;
+  }
+
+  Task? _firstTravelAtRiskTask(List<Task> tasks) {
+    final travelTasks = tasks.where((task) {
+      if (task.status == TaskStatus.completed) {
+        return false;
+      }
+
+      final title = task.title.toLowerCase();
+      final description = task.description?.toLowerCase() ?? '';
+      return title.contains('travel') || description.contains('travel');
+    }).toList();
+
+    if (travelTasks.isEmpty) {
+      return null;
+    }
+
+    travelTasks.sort((a, b) => a.scheduledStart.compareTo(b.scheduledStart));
+    return travelTasks.first;
+  }
+
+  DateTime? _deriveSleepAtRiskTime(
+    List<Task> tasks, {
+    required TargetSleepTime targetSleepTime,
+  }) {
+    DateTime? latestEnd;
+    for (final task in tasks) {
+      if (task.status == TaskStatus.completed) {
+        continue;
+      }
+      if (latestEnd == null || task.scheduledEnd.isAfter(latestEnd)) {
+        latestEnd = task.scheduledEnd;
+      }
+    }
+
+    if (latestEnd == null) {
+      return null;
+    }
+
+    final targetSleepDateTime = DateTime(
+      latestEnd.year,
+      latestEnd.month,
+      latestEnd.day,
+      targetSleepTime.hour,
+      targetSleepTime.minute,
+    );
+    final riskThreshold = targetSleepDateTime.add(_sleepRiskGraceWindow);
+    if (latestEnd.isAfter(riskThreshold)) {
+      return latestEnd;
+    }
+
+    return null;
   }
 }
 

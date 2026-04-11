@@ -8,6 +8,7 @@ import '../../../core/background/background_status.dart';
 import '../../../core/platform/lock_screen_assistant_controller.dart';
 import '../../../core/scheduler/priority_mode.dart';
 import '../../../core/scheduler/priority_mode_persistence.dart';
+import '../../../core/scheduler/target_sleep_time_persistence.dart';
 import '../../../core/storage/isar_provider.dart';
 import '../../../shared/spotlight/spotlight_overlay.dart';
 import '../../assistant/application/assistant_controller.dart';
@@ -23,6 +24,15 @@ class SentinelHomeScreen extends ConsumerStatefulWidget {
 
 class _SentinelHomeScreenState extends ConsumerState<SentinelHomeScreen> {
   final GlobalKey _priorityToggleKey = GlobalKey();
+  final GlobalKey _travelRiskCardKey = GlobalKey();
+  TargetSleepTime _targetSleepTime = const TargetSleepTime(hour: 23, minute: 0);
+  BackgroundRecalculationEvent? _latestRecalculationEvent;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadTargetSleepTime());
+  }
 
   void _showSpotlight() {
     final targetContext = _priorityToggleKey.currentContext;
@@ -41,6 +51,55 @@ class _SentinelHomeScreenState extends ConsumerState<SentinelHomeScreen> {
         .show(context, spotlightRect: rect.inflate(10));
   }
 
+  void _showTravelRiskSpotlight() {
+    final targetContext = _travelRiskCardKey.currentContext;
+    if (targetContext == null) {
+      return;
+    }
+
+    final renderBox = targetContext.findRenderObject() as RenderBox?;
+    if (renderBox == null) {
+      return;
+    }
+
+    final rect = renderBox.localToGlobal(Offset.zero) & renderBox.size;
+    ref
+        .read(spotlightOverlayControllerProvider)
+        .show(context, spotlightRect: rect.inflate(10));
+  }
+
+  Future<void> _loadTargetSleepTime() async {
+    final value = await TargetSleepTimePersistence.load();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _targetSleepTime = value;
+    });
+  }
+
+  Future<void> _pickTargetSleepTime() async {
+    final selected = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(
+        hour: _targetSleepTime.hour,
+        minute: _targetSleepTime.minute,
+      ),
+    );
+    if (selected == null) {
+      return;
+    }
+
+    final next = TargetSleepTime(hour: selected.hour, minute: selected.minute);
+    await TargetSleepTimePersistence.save(next);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _targetSleepTime = next;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final mode = ref.watch(priorityModeProvider);
@@ -52,7 +111,15 @@ class _SentinelHomeScreenState extends ConsumerState<SentinelHomeScreen> {
 
     ref.listen(backgroundRecalculationProvider, (_, next) {
       next.whenData((event) {
-        if (!event.isThrottled && event.changedTaskCount > 0) {
+        setState(() {
+          _latestRecalculationEvent = event;
+        });
+
+        final isTravelStationaryTrigger =
+            event.triggerSource == 'gps_travel_stationary_5m';
+
+        if (!event.isThrottled &&
+            (event.changedTaskCount > 0 || isTravelStationaryTrigger)) {
           final mode = ref.read(priorityModeProvider);
           unawaited(
             LockScreenAssistantController.instance.syncRecalculation(
@@ -60,7 +127,17 @@ class _SentinelHomeScreenState extends ConsumerState<SentinelHomeScreen> {
               mode: mode,
             ),
           );
-          ref.read(assistantControllerProvider).onRecalculationTriggered();
+          ref.read(assistantControllerProvider).onRecalculationTriggered(event);
+        }
+
+        if (isTravelStationaryTrigger &&
+            (event.failingTravelTaskTitle?.isNotEmpty ?? false)) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) {
+              return;
+            }
+            _showTravelRiskSpotlight();
+          });
         }
       });
     });
@@ -165,6 +242,35 @@ class _SentinelHomeScreenState extends ConsumerState<SentinelHomeScreen> {
             ),
             const SizedBox(height: 12),
             Card(
+              key: _travelRiskCardKey,
+              child: ListTile(
+                title: Text(
+                  _latestRecalculationEvent?.failingTravelTaskTitle == null
+                      ? 'Travel Task Risk'
+                      : 'Travel Task Risk: ${_latestRecalculationEvent!.failingTravelTaskTitle}',
+                ),
+                subtitle: Text(
+                  _latestRecalculationEvent == null
+                      ? 'Waiting for travel risk signal...'
+                      : _buildTravelRiskSummary(_latestRecalculationEvent!),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
+              child: ListTile(
+                title: const Text('Target Sleep Time'),
+                subtitle: Text(
+                  '${_formatTargetSleepTime(_targetSleepTime)} (risk after +15m)',
+                ),
+                trailing: FilledButton.tonal(
+                  onPressed: _pickTargetSleepTime,
+                  child: const Text('Set'),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
               child: ListTile(
                 title: const Text('GPS Stream'),
                 subtitle: Column(
@@ -211,5 +317,37 @@ class _SentinelHomeScreenState extends ConsumerState<SentinelHomeScreen> {
         ),
       ),
     );
+  }
+
+  String _formatTargetSleepTime(TargetSleepTime value) {
+    final asDateTime = DateTime(2000, 1, 1, value.hour, value.minute);
+    return _formatTime12h(asDateTime);
+  }
+
+  String _formatTime12h(DateTime? value) {
+    if (value == null) {
+      return 'unknown';
+    }
+
+    var hour = value.hour;
+    final suffix = hour >= 12 ? 'PM' : 'AM';
+    hour = hour % 12;
+    if (hour == 0) {
+      hour = 12;
+    }
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '$hour:$minute $suffix';
+  }
+
+  String _buildTravelRiskSummary(BackgroundRecalculationEvent event) {
+    final buffer = StringBuffer(
+      'Stationary ${event.stationaryMinutes ?? 5}m, day delay ${event.totalDayDelayMinutes ?? 0}m',
+    );
+    if (event.sleepAtRiskTime != null) {
+      buffer.write(', sleep at risk ${_formatTime12h(event.sleepAtRiskTime)}');
+    } else {
+      buffer.write(', sleep on track');
+    }
+    return buffer.toString();
   }
 }
