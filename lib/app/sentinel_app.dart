@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/background/background_status.dart';
+import '../core/background/notification_bridge.dart';
 import '../core/platform/lock_screen_assistant_controller.dart';
 import '../core/scheduler/priority_mode.dart';
 import '../features/home/presentation/home_screen.dart';
@@ -19,6 +20,26 @@ class SentinelApp extends ConsumerStatefulWidget {
 }
 
 class _SentinelAppState extends ConsumerState<SentinelApp> {
+  StreamSubscription<Map<String, dynamic>>? _notificationTapSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _notificationTapSubscription = NotificationBridge.onNotificationTap.listen(
+      _openNegotiationFromPayload,
+    );
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_consumeLaunchNotificationPayload());
+    });
+  }
+
+  @override
+  void dispose() {
+    _notificationTapSubscription?.cancel();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     ref.listen(backgroundStatusProvider, (_, next) {
@@ -45,10 +66,41 @@ class _SentinelAppState extends ConsumerState<SentinelApp> {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0E5A8A)),
       ),
       initialRoute: '/',
-      routes: {
-        '/': (_) => const SentinelHomeScreen(),
-        '/negotiation': (_) => const NegotiationScreen(),
+      onGenerateRoute: (settings) {
+        if (settings.name == '/') {
+          return MaterialPageRoute<void>(
+            builder: (_) => const SentinelHomeScreen(),
+            settings: settings,
+          );
+        }
+
+        if (settings.name == '/negotiation') {
+          final event = settings.arguments as BackgroundRecalculationEvent?;
+          return MaterialPageRoute<void>(
+            builder: (_) => NegotiationScreen(event: event),
+            settings: settings,
+          );
+        }
+
+        return null;
       },
+    );
+  }
+
+  Future<void> _consumeLaunchNotificationPayload() async {
+    final payload = await NotificationBridge.consumeLaunchTapPayload();
+    if (!mounted || payload == null) {
+      return;
+    }
+    _openNegotiationFromPayload(payload);
+  }
+
+  void _openNegotiationFromPayload(Map<String, dynamic> payload) {
+    final event = BackgroundRecalculationEvent.fromMap(payload);
+    AppNavigator.rootNavigatorKey.currentState?.pushNamedAndRemoveUntil(
+      '/negotiation',
+      (route) => route.settings.name != '/negotiation',
+      arguments: event,
     );
   }
 }
