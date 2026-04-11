@@ -108,7 +108,9 @@ class _BrainSignalMonitor {
   static const Duration _timeTickMinimumInterval = Duration(seconds: 50);
   static const Duration _gpsDebounceDuration = Duration(seconds: 8);
   static const Duration _gpsMinimumInterval = Duration(seconds: 30);
-  static const Duration _gpsPollingInterval = Duration(seconds: 20);
+  static const Duration _gpsPollingIntervalTravelActive = Duration(seconds: 20);
+  static const Duration _gpsPollingIntervalTravelIdle = Duration(seconds: 90);
+  static const Duration _gpsSamplingRefreshInterval = Duration(minutes: 1);
 
   final ServiceInstance _service;
   final BackgroundSchedulerOrchestrator _scheduler =
@@ -119,10 +121,13 @@ class _BrainSignalMonitor {
   Timer? _statusTimer;
   Timer? _gpsDebounceTimer;
   Timer? _gpsPollingTimer;
+  Timer? _gpsSamplingTimer;
   StreamSubscription<DateTime>? _timeSubscription;
   StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<Map<String, dynamic>?>? _priorityModeSubscription;
   final Map<String, DateTime> _lastRecalculationAt = {};
+  int? _lastStationaryTriggerMinutes;
+  bool _isTravelTaskActive = false;
   double? _pendingLatitude;
   double? _pendingLongitude;
 
@@ -174,10 +179,10 @@ class _BrainSignalMonitor {
 
     await _startLocationStream();
 
-    // Stream updates can be sparse on emulator/fused provider; polling keeps
-    // location signals flowing for deterministic testing.
-    _gpsPollingTimer = Timer.periodic(_gpsPollingInterval, (_) {
-      unawaited(_pollCurrentPosition());
+    await _refreshTravelTaskSampling();
+    _restartGpsPollingTimer();
+    _gpsSamplingTimer = Timer.periodic(_gpsSamplingRefreshInterval, (_) {
+      unawaited(_refreshTravelTaskSampling());
     });
   }
 
@@ -267,7 +272,9 @@ class _BrainSignalMonitor {
               name: 'SentinelBG',
             );
 
-            _scheduleGpsRecalculation(position);
+            if (_isTravelTaskActive) {
+              _scheduleGpsRecalculation(position);
+            }
             unawaited(_evaluateTravelStationaryTrigger(position));
           });
     } catch (_) {
@@ -311,7 +318,9 @@ class _BrainSignalMonitor {
         'state': 'poll_tick_received',
       });
 
-      _scheduleGpsRecalculation(position);
+      if (_isTravelTaskActive) {
+        _scheduleGpsRecalculation(position);
+      }
       unawaited(_evaluateTravelStationaryTrigger(position));
     } catch (_) {
       _service.invoke('gps_status', {
@@ -341,6 +350,11 @@ class _BrainSignalMonitor {
 
   Future<void> _evaluateTravelStationaryTrigger(Position position) async {
     final hasTravelTask = await _scheduler.hasInProgressTravelTask();
+    if (_isTravelTaskActive != hasTravelTask) {
+      _isTravelTaskActive = hasTravelTask;
+      _restartGpsPollingTimer();
+    }
+
     final sample = TravelLocationSample.fromPosition(position);
     if (!_travelStationaryDetector.observe(
       sample: sample,
@@ -350,6 +364,13 @@ class _BrainSignalMonitor {
     }
 
     final now = sample.timestamp;
+    final stationaryMinutes = (
+      _travelStationaryDetector.stationaryWarmup +
+      _travelStationaryDetector.stationaryDuration
+    ).inMinutes;
+
+    _lastStationaryTriggerMinutes = stationaryMinutes;
+
     _service.invoke('gps_status', {
       'timestamp': now.toIso8601String(),
       'state': 'travel_stationary_recalc_trigger',
@@ -410,7 +431,39 @@ class _BrainSignalMonitor {
       'changedTaskCount': result.changedTaskCount,
       'totalTaskCount': result.totalTaskCount,
       'hasError': result.hasError,
+      'isThrottled': false,
+      'failingTravelTaskTitle': result.failingTravelTaskTitle,
+      'totalDayDelayMinutes': result.totalDayDelayMinutes,
+      'sleepAtRiskTime': result.sleepAtRiskTime?.toIso8601String(),
+      'stationaryMinutes': _lastStationaryTriggerMinutes,
     });
+
+    if (triggerSource == 'gps_travel_stationary_5m') {
+      final payload = <String, dynamic>{
+        'timestamp': now.toIso8601String(),
+        'triggerSource': result.triggerSource,
+        'changedTaskCount': result.changedTaskCount,
+        'totalTaskCount': result.totalTaskCount,
+        'hasError': result.hasError,
+        'isThrottled': false,
+        'failingTravelTaskTitle': result.failingTravelTaskTitle,
+        'totalDayDelayMinutes': result.totalDayDelayMinutes,
+        'sleepAtRiskTime': result.sleepAtRiskTime?.toIso8601String(),
+        'stationaryMinutes': _lastStationaryTriggerMinutes,
+      };
+      final narrative = _buildNarrativeSnippet(
+        stationaryMinutes: _lastStationaryTriggerMinutes,
+        dayDelayMinutes: result.totalDayDelayMinutes,
+        sleepAtRiskTime: result.sleepAtRiskTime,
+      );
+      await NotificationBridge.showTravelRiskAlert(
+        title: 'Travel task blocked',
+        body:
+            '${result.failingTravelTaskTitle ?? 'Travel task'} needs intervention. $narrative',
+        payload: payload,
+      );
+      _lastStationaryTriggerMinutes = null;
+    }
     developer.log(
       'Recalc complete trigger=${result.triggerSource} changed=${result.changedTaskCount}/${result.totalTaskCount}',
       name: 'SentinelBG',
@@ -421,9 +474,62 @@ class _BrainSignalMonitor {
     _statusTimer?.cancel();
     _gpsDebounceTimer?.cancel();
     _gpsPollingTimer?.cancel();
+    _gpsSamplingTimer?.cancel();
     await _timeSubscription?.cancel();
     await _positionSubscription?.cancel();
     await _priorityModeSubscription?.cancel();
     await _scheduler.dispose();
+  }
+
+  Duration get _currentGpsPollingInterval {
+    return _isTravelTaskActive
+        ? _gpsPollingIntervalTravelActive
+        : _gpsPollingIntervalTravelIdle;
+  }
+
+  void _restartGpsPollingTimer() {
+    _gpsPollingTimer?.cancel();
+    _gpsPollingTimer = Timer.periodic(
+      _currentGpsPollingInterval,
+      (_) => unawaited(_pollCurrentPosition()),
+    );
+  }
+
+  Future<void> _refreshTravelTaskSampling() async {
+    final hasTravelTask = await _scheduler.hasInProgressTravelTask();
+    if (_isTravelTaskActive == hasTravelTask) {
+      return;
+    }
+
+    _isTravelTaskActive = hasTravelTask;
+    _restartGpsPollingTimer();
+  }
+
+  String _buildNarrativeSnippet({
+    int? stationaryMinutes,
+    int? dayDelayMinutes,
+    DateTime? sleepAtRiskTime,
+  }) {
+    final stationary = stationaryMinutes ?? 5;
+    final delay = dayDelayMinutes ?? 0;
+    final buffer = StringBuffer(
+      'Stationary for ${stationary}m. Total day delay: ${delay}m.',
+    );
+    if (sleepAtRiskTime != null) {
+      buffer.write(' Sleep at risk: ${_formatTime12h(sleepAtRiskTime)}.');
+    }
+    buffer.write(' Optimize?');
+    return buffer.toString();
+  }
+
+  String _formatTime12h(DateTime value) {
+    var hour = value.hour;
+    final suffix = hour >= 12 ? 'PM' : 'AM';
+    hour = hour % 12;
+    if (hour == 0) {
+      hour = 12;
+    }
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '$hour:$minute $suffix';
   }
 }

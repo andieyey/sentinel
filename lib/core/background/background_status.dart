@@ -22,6 +22,10 @@ class BackgroundRecalculationEvent {
     required this.totalTaskCount,
     required this.hasError,
     required this.isThrottled,
+    this.failingTravelTaskTitle,
+    this.totalDayDelayMinutes,
+    this.sleepAtRiskTime,
+    this.stationaryMinutes,
     this.throttleKey,
     this.minimumIntervalMs,
   });
@@ -32,8 +36,59 @@ class BackgroundRecalculationEvent {
   final int totalTaskCount;
   final bool hasError;
   final bool isThrottled;
+  final String? failingTravelTaskTitle;
+  final int? totalDayDelayMinutes;
+  final DateTime? sleepAtRiskTime;
+  final int? stationaryMinutes;
   final String? throttleKey;
   final int? minimumIntervalMs;
+
+  factory BackgroundRecalculationEvent.fromMap(Map<String, dynamic> payload) {
+    final timestampRaw = payload['timestamp'] as String?;
+    final triggerSource = payload['triggerSource'] as String? ?? 'unknown';
+    final changedTaskCount = payload['changedTaskCount'] as int? ?? 0;
+    final totalTaskCount = payload['totalTaskCount'] as int? ?? 0;
+    final hasError = payload['hasError'] as bool? ?? false;
+    final isThrottled = payload['isThrottled'] as bool? ?? false;
+    final failingTravelTaskTitle = payload['failingTravelTaskTitle'] as String?;
+    final totalDayDelayMinutes = payload['totalDayDelayMinutes'] as int?;
+    final sleepAtRiskTimeRaw = payload['sleepAtRiskTime'] as String?;
+    final stationaryMinutes = payload['stationaryMinutes'] as int?;
+    final throttleKey = payload['throttleKey'] as String?;
+    final minimumIntervalMs = payload['minimumIntervalMs'] as int?;
+
+    return BackgroundRecalculationEvent(
+      timestamp: DateTime.tryParse(timestampRaw ?? '') ?? DateTime.now(),
+      triggerSource: triggerSource,
+      changedTaskCount: changedTaskCount,
+      totalTaskCount: totalTaskCount,
+      hasError: hasError,
+      isThrottled: isThrottled,
+      failingTravelTaskTitle: failingTravelTaskTitle,
+      totalDayDelayMinutes: totalDayDelayMinutes,
+      sleepAtRiskTime: DateTime.tryParse(sleepAtRiskTimeRaw ?? ''),
+      stationaryMinutes: stationaryMinutes,
+      throttleKey: throttleKey,
+      minimumIntervalMs: minimumIntervalMs,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'timestamp': timestamp.toIso8601String(),
+      'triggerSource': triggerSource,
+      'changedTaskCount': changedTaskCount,
+      'totalTaskCount': totalTaskCount,
+      'hasError': hasError,
+      'isThrottled': isThrottled,
+      'failingTravelTaskTitle': failingTravelTaskTitle,
+      'totalDayDelayMinutes': totalDayDelayMinutes,
+      'sleepAtRiskTime': sleepAtRiskTime?.toIso8601String(),
+      'stationaryMinutes': stationaryMinutes,
+      'throttleKey': throttleKey,
+      'minimumIntervalMs': minimumIntervalMs,
+    };
+  }
 }
 
 class BackgroundGpsTick {
@@ -96,22 +151,11 @@ final backgroundRecalculationProvider =
       final subscription = service.on('recalculation_complete').listen((
         payload,
       ) {
-        final timestampRaw = payload?['timestamp'] as String?;
-        final triggerSource = payload?['triggerSource'] as String? ?? 'unknown';
-        final changedTaskCount = payload?['changedTaskCount'] as int? ?? 0;
-        final totalTaskCount = payload?['totalTaskCount'] as int? ?? 0;
-        final hasError = payload?['hasError'] as bool? ?? false;
+        if (payload == null) {
+          return;
+        }
 
-        controller.add(
-          BackgroundRecalculationEvent(
-            timestamp: DateTime.tryParse(timestampRaw ?? '') ?? DateTime.now(),
-            triggerSource: triggerSource,
-            changedTaskCount: changedTaskCount,
-            totalTaskCount: totalTaskCount,
-            hasError: hasError,
-            isThrottled: false,
-          ),
-        );
+        controller.add(BackgroundRecalculationEvent.fromMap(payload));
       });
 
       final throttledSubscription = service
@@ -124,17 +168,20 @@ final backgroundRecalculationProvider =
             final minimumIntervalMs = payload?['minimumIntervalMs'] as int?;
 
             controller.add(
-              BackgroundRecalculationEvent(
-                timestamp:
-                    DateTime.tryParse(timestampRaw ?? '') ?? DateTime.now(),
-                triggerSource: triggerSource,
-                changedTaskCount: 0,
-                totalTaskCount: 0,
-                hasError: false,
-                isThrottled: true,
-                throttleKey: throttleKey,
-                minimumIntervalMs: minimumIntervalMs,
-              ),
+              BackgroundRecalculationEvent.fromMap({
+                'timestamp': timestampRaw,
+                'triggerSource': triggerSource,
+                'changedTaskCount': 0,
+                'totalTaskCount': 0,
+                'hasError': false,
+                'isThrottled': true,
+                'failingTravelTaskTitle': null,
+                'totalDayDelayMinutes': null,
+                'sleepAtRiskTime': null,
+                'stationaryMinutes': null,
+                'throttleKey': throttleKey,
+                'minimumIntervalMs': minimumIntervalMs,
+              }),
             );
           });
 
